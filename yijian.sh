@@ -65,10 +65,29 @@ QR_FILE='/root/vless_reality_qr.png'
 SERVICE_NAME='xray'
 
 DEFAULT_TLS_CANDIDATES=(
-    www.microsoft.com www.apple.com www.cloudflare.com
-    www.bing.com www.amazon.com www.oracle.com
-    www.ibm.com www.baidu.com www.qq.com
-    www.jd.com www.taobao.com www.aliyun.com www.huawei.com
+    # Microsoft 二三级域名
+    login.microsoft.com
+    account.microsoft.com
+    teams.microsoft.com
+    azure.microsoft.com
+    login.live.com
+    # Apple 二三级域名
+    icloud.com
+    developer.apple.com
+    support.apple.com
+    itunes.apple.com
+    # Bing 二三级域名
+    cn.bing.com
+    global.bing.com
+    # Amazon 二三级域名
+    aws.amazon.com
+    s3.amazonaws.com
+    # Cloudflare 二三级域名
+    dash.cloudflare.com
+    workers.cloudflare.com
+    # Oracle 二三级域名
+    cloud.oracle.com
+    signup.oracle.com
 )
 
 vless_menu() {
@@ -237,52 +256,73 @@ vless_install_interactive() {
         [[ "$ans" =~ ^[Yy] ]] || { warn "已取消"; press_enter; vless_menu; return; }
     fi
 
-    # ── 端口 ──
-    local rand_port; rand_port="$(pick_random_free_port)"
-    ask "监听端口 [默认: ${rand_port} 随机]: "
-    read -r PORT_IN; PORT_IN="${PORT_IN:-$rand_port}"
-    validate_port "$PORT_IN" || { warn "端口格式错误"; press_enter; vless_install_interactive; return; }
+    # ── 全自动参数（无需用户输入）──────────────────
+    # 端口：随机空闲端口
+    local PORT_IN; PORT_IN="$(pick_random_free_port)"
 
-    # ── SNI ──
-    echo ""
+    # SNI：联网测试候选列表，选出可用域名
     v_log "自动探测可用 TLS 域名，请稍候..."
-    local auto_sni
-    if auto_sni="$(pick_random_tls_host 2>/dev/null)"; then
-        v_log "探测到可用域名: ${auto_sni}"
+    local SNI_IN
+    if SNI_IN="$(pick_random_tls_host 2>/dev/null)"; then
+        v_log "探测到可用 SNI: ${SNI_IN}"
     else
-        auto_sni='www.microsoft.com'
-        warn "自动探测失败，使用默认: ${auto_sni}"
+        SNI_IN='www.microsoft.com'
+        warn "自动探测失败，回退到: ${SNI_IN}"
     fi
-    ask "REALITY SNI 域名 [默认: ${auto_sni}]: "
-    read -r SNI_IN; SNI_IN="${SNI_IN:-$auto_sni}"
-    validate_server_name "$SNI_IN" || { warn "域名格式错误"; press_enter; vless_install_interactive; return; }
 
-    # ── DEST ──
-    local auto_dest="${SNI_IN}:443"
-    ask "REALITY Dest [默认: ${auto_dest}]: "
-    read -r DEST_IN; DEST_IN="${DEST_IN:-$auto_dest}"
+    # Dest：跟随 SNI
+    local DEST_IN="${SNI_IN}:443"
 
-    # ── 连接地址 ──
+    # 连接地址：优先独立公网 IPv4，否则 IPv6
     local v4; v4="$(get_public_ipv4)"
     local v6; v6="$(get_public_ipv6)"
-    local auto_ip="$v4"
-    [ -z "$auto_ip" ] && auto_ip="$v6"
-    [ -z "$auto_ip" ] && auto_ip="YOUR_SERVER_IP"
-    ask "客户端连接地址 [默认: ${auto_ip}]: "
-    read -r IP_IN; IP_IN="${IP_IN:-$auto_ip}"
+    local IP_IN="$v4"
+    [ -z "$IP_IN" ] && IP_IN="$v6"
+    [ -z "$IP_IN" ] && IP_IN="YOUR_SERVER_IP"
 
-    # ── 备注 ──
-    ask "节点备注 [默认: vless-reality]: "
-    read -r REMARK_IN; REMARK_IN="$(slugify_remark "${REMARK_IN:-vless-reality}")"
+    # 备注：固定默认值
+    local REMARK_IN='vless-reality'
 
-    # ── 确认 ──
+    # ── 显示配置摘要，确认后再安装 ──────────────────
     echo ""
-    echo -e "${BOLD}━━━ 配置确认 ━━━${NC}"
+    echo -e "${BOLD}━━━ 自动配置摘要（直接回车确认）━━━${NC}"
     echo -e "  端口:   ${BOLD}${PORT_IN}${NC}"
     echo -e "  SNI:    ${BOLD}${SNI_IN}${NC}"
     echo -e "  Dest:   ${BOLD}${DEST_IN}${NC}"
     echo -e "  地址:   ${BOLD}${IP_IN}${NC}"
     echo -e "  备注:   ${BOLD}${REMARK_IN}${NC}"
+    echo ""
+    echo -e "  ${YELLOW}如需修改某项，请输入对应数字，否则直接回车开始安装:${NC}"
+    echo -e "  1) 修改端口  2) 修改SNI  3) 修改连接地址  4) 修改备注"
+    echo ""
+    ask "选择 [直接回车=开始安装]: "
+    read -r MODIFY_C
+
+    case "${MODIFY_C:-}" in
+        1)
+            ask "监听端口: "; read -r PORT_IN
+            validate_port "$PORT_IN" || { warn "端口格式错误"; press_enter; vless_install_interactive; return; }
+            ;;
+        2)
+            ask "SNI 域名: "; read -r SNI_IN
+            validate_server_name "$SNI_IN" || { warn "域名格式错误"; press_enter; vless_install_interactive; return; }
+            DEST_IN="${SNI_IN}:443"
+            ;;
+        3)
+            ask "连接地址: "; read -r IP_IN
+            ;;
+        4)
+            ask "节点备注: "; read -r REMARK_IN
+            REMARK_IN="$(slugify_remark "$REMARK_IN")"
+            ;;
+        '')
+            : # 直接回车，使用自动配置
+            ;;
+        *)
+            warn "无效选项，使用自动配置"
+            ;;
+    esac
+
     echo ""
     ask "确认安装？(y/n) [默认: y]: "
     read -r CONFIRM; CONFIRM="${CONFIRM:-y}"
