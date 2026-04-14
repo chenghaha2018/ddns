@@ -245,6 +245,19 @@ detect_arch() {
     esac
 }
 
+# ── [修复] 从 xray x25519 输出中提取密钥 ──────────
+# xray x25519 输出格式（不同版本可能有差异）:
+#   Private key: xxxxxx
+#   Public key:  xxxxxx
+# 使用 grep -i 忽略大小写，sed 去除冒号前的标签和首尾空格，兼容各版本
+parse_xray_private_key() {
+    printf '%s\n' "$1" | grep -i 'private key' | sed 's/^[^:]*://;s/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
+parse_xray_public_key() {
+    printf '%s\n' "$1" | grep -i 'public key' | sed 's/^[^:]*://;s/^[[:space:]]*//;s/[[:space:]]*$//'
+}
+
 vless_install_interactive() {
     title "安装 VLESS + REALITY"
 
@@ -350,14 +363,31 @@ vless_install_interactive() {
     [ -f "$tmpdir/xray/geosite.dat" ] && install -m 644 "$tmpdir/xray/geosite.dat" "$XRAY_SHARE/" || true
     rm -rf "$tmpdir"
 
+    # ── [修复] 生成密钥 ────────────────────────────
     v_log "生成密钥..."
     local UUID; UUID="$("$XRAY_BIN" uuid 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
-    local key_out; key_out="$("$XRAY_BIN" x25519 2>/dev/null)"
-    local PRIVATE_KEY; PRIVATE_KEY="$(printf '%s\n' "$key_out" | awk -F': ' '/^PrivateKey:|^Private key:/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}')"
-    local PUBLIC_KEY;  PUBLIC_KEY="$(printf '%s\n'  "$key_out" | awk -F': ' '/^Password:|^Public key:/{gsub(/^[ \t]+|[ \t]+$/,"",$2); print $2}')"
-    local SHORT_ID;    SHORT_ID="$(openssl rand -hex 8)"
-    [ -n "$PRIVATE_KEY" ] || v_die "生成私钥失败"
-    [ -n "$PUBLIC_KEY" ]  || v_die "生成公钥失败"
+
+    # 先捕获原始输出，便于调试
+    local key_out
+    key_out="$("$XRAY_BIN" x25519 2>&1)" || true
+
+    # 使用健壮的 grep+sed 解析，兼容各版本 xray 输出格式
+    local PRIVATE_KEY; PRIVATE_KEY="$(parse_xray_private_key "$key_out")"
+    local PUBLIC_KEY;  PUBLIC_KEY="$(parse_xray_public_key  "$key_out")"
+
+    # 若解析失败则打印原始输出方便排查，再退出
+    if [ -z "$PRIVATE_KEY" ]; then
+        v_err "生成私钥失败，xray x25519 原始输出如下："
+        printf '%s\n' "$key_out" >&2
+        v_die "请检查 xray 二进制是否完整（运行 ${XRAY_BIN} version）"
+    fi
+    if [ -z "$PUBLIC_KEY" ]; then
+        v_err "生成公钥失败，xray x25519 原始输出如下："
+        printf '%s\n' "$key_out" >&2
+        v_die "请检查 xray 二进制是否完整（运行 ${XRAY_BIN} version）"
+    fi
+
+    local SHORT_ID; SHORT_ID="$(openssl rand -hex 8)"
 
     v_log "写入配置..."
     [ -f "$CONFIG_FILE" ] && cp -a "$CONFIG_FILE" "${CONFIG_FILE}.bak.$(date +%Y%m%d_%H%M%S)"
