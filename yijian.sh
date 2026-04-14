@@ -246,16 +246,20 @@ detect_arch() {
 }
 
 # ── [修复] 从 xray x25519 输出中提取密钥 ──────────
-# xray x25519 输出格式（不同版本可能有差异）:
-#   Private key: xxxxxx
-#   Public key:  xxxxxx
-# 使用 grep -i 忽略大小写，sed 去除冒号前的标签和首尾空格，兼容各版本
+# 兼容多种 xray 版本输出格式：
+#   旧版: "Private key: xxx" / "Public key: xxx"
+#   新版(26.x): "PrivateKey: xxx" / "Password (PublicKey): xxx"
 parse_xray_private_key() {
-    printf '%s\n' "$1" | grep -i 'private key' | sed 's/^[^:]*://;s/^[[:space:]]*//;s/[[:space:]]*$//'
+    printf '%s\n' "$1" \
+        | grep -i 'privatekey\|private key' \
+        | grep -iv 'public' \
+        | sed 's/^[^:]*://;s/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 parse_xray_public_key() {
-    printf '%s\n' "$1" | grep -i 'public key' | sed 's/^[^:]*://;s/^[[:space:]]*//;s/[[:space:]]*$//'
+    printf '%s\n' "$1" \
+        | grep -i 'publickey\|public key\|password' \
+        | sed 's/^[^:]*://;s/^[[:space:]]*//;s/[[:space:]]*$//'
 }
 
 vless_install_interactive() {
