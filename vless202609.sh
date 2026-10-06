@@ -1,6 +1,6 @@
 #!/bin/bash 
 #═══════════════════════════════════════════════════════════════════════════════
-#  多协议代理一键部署脚本 v3.4.10 [服务端]
+#  多协议代理一键部署脚本 v1.0 [服务端]
 #  
 #  架构升级:
 #    • Xray 核心: 处理 TCP/TLS 协议 (VLESS/VMess/Trojan/SOCKS/SS2022)
@@ -11,17 +11,10 @@
 #           Snell v4 / Snell v5 / AnyTLS / TUIC / NaïveProxy (共14种)
 #  插件支持: Snell v4/v5 和 SS2022 可选启用 ShadowTLS
 #  适配: Alpine/Debian/Ubuntu/CentOS
-#  
-#  
-#  作者: Chil30
-#  项目地址: https://github.com/Chil30/vless-all-in-one
+#
 #═══════════════════════════════════════════════════════════════════════════════
 
-readonly VERSION="3.4.10"
-readonly AUTHOR="Chil30"
-readonly REPO_URL="https://github.com/Chil30/vless-all-in-one"
-readonly SCRIPT_REPO="Chil30/vless-all-in-one"
-readonly SCRIPT_RAW_URL="https://raw.githubusercontent.com/Chil30/vless-all-in-one/main/vless-server.sh"
+readonly VERSION="1.0"
 readonly CFG="/etc/vless-reality"
 readonly ACME_DEFAULT_EMAIL="acme@vaio.com"
 
@@ -57,7 +50,8 @@ readonly DB_FILE="$CFG/db.json"
 # 初始化数据库
 init_db() {
     mkdir -p "$CFG" || return 1
-    [[ -f "$DB_FILE" ]] && return 0
+    chmod 700 "$CFG" 2>/dev/null
+    [[ -f "$DB_FILE" ]] && { chmod 600 "$DB_FILE" 2>/dev/null; return 0; }
     local now tmp
     # Alpine busybox date 不支持 -Iseconds，使用兼容格式
     now=$(date '+%Y-%m-%dT%H:%M:%S%z' 2>/dev/null || date '+%Y-%m-%dT%H:%M:%S')
@@ -1365,6 +1359,69 @@ send_expire_warnings() {
         ((count++))
     done <<< "$expiring_users"
     
+    echo "$count"
+}
+
+#═══════════════════════════════════════════════════════════════════════════════
+#  按月自动重置流量
+#═══════════════════════════════════════════════════════════════════════════════
+readonly MONTHLY_RESET_FILE="$CFG/monthly_reset_day"
+readonly MONTHLY_RESET_LAST="$CFG/monthly_reset_last"
+
+# 是否已启用 (存在配置文件即启用)
+monthly_reset_enabled() {
+    [[ -f "$MONTHLY_RESET_FILE" ]]
+}
+
+# 读取重置日期 (每月几号, 1-28)
+monthly_reset_get_day() {
+    cat "$MONTHLY_RESET_FILE" 2>/dev/null
+}
+
+# 启用/修改重置日期
+monthly_reset_set_day() {
+    echo "$1" > "$MONTHLY_RESET_FILE"
+}
+
+# 关闭
+monthly_reset_disable() {
+    rm -f "$MONTHLY_RESET_FILE" "$MONTHLY_RESET_LAST"
+}
+
+# 重置所有协议所有用户的流量, 返回重置的用户数
+monthly_reset_all_users() {
+    local count=0
+    local protocols=$(db_get_all_protocols)
+    while IFS= read -r proto; do
+        [[ -z "$proto" ]] && continue
+        local core="xray"
+        db_exists "singbox" "$proto" && core="singbox"
+        local users=$(db_list_users "$core" "$proto")
+        while IFS= read -r user; do
+            [[ -z "$user" ]] && continue
+            db_reset_user_traffic "$core" "$proto" "$user" && ((count++))
+        done <<< "$users"
+    done <<< "$protocols"
+    echo "$count"
+}
+
+# 检查并执行按月重置 (每天由过期检查 cron 调用, 每月只执行一次)
+monthly_traffic_reset() {
+    monthly_reset_enabled || return 0
+
+    local day=$(monthly_reset_get_day)
+    local today=$(date +%d | sed 's/^0//')
+    local cur_month=$(date +%Y-%m)
+    local last_month=$(cat "$MONTHLY_RESET_LAST" 2>/dev/null)
+
+    # 未到重置日 或 本月已重置过
+    [[ "$today" -lt "$day" ]] && return 0
+    [[ "$last_month" == "$cur_month" ]] && return 0
+
+    local count=$(monthly_reset_all_users)
+    echo "$cur_month" > "$MONTHLY_RESET_LAST"
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] 按月重置: 重置 $count 个用户的流量" >> "$CFG/expire.log"
+    send_tg_message "♻️ 按月流量重置: 已重置 $count 个用户的流量" 2>/dev/null
     echo "$count"
 }
 
@@ -3967,8 +4024,7 @@ _header() {
     clear; echo "" >&2
     _dline
     echo -e "      ${W}多协议代理${NC} ${D}一键部署${NC} ${C}v${VERSION}${NC} ${Y}[服务端]${NC}" >&2
-    echo -e "      ${D}作者: ${AUTHOR}  快捷命令: vless${NC}" >&2
-    echo -e "      ${D}${REPO_URL}${NC}" >&2
+    echo -e "      ${D}快捷命令: vless${NC}" >&2
     _dline
 }
 
@@ -6620,131 +6676,20 @@ _is_cache_fresh() {
 }
 
 # 下载脚本到临时文件（回显临时文件路径）
-_fetch_script_tmp() {
-    local connect_timeout="${1:-10}"
-    local max_time="${2:-}"
-    local tmp_file
-    tmp_file=$(mktemp 2>/dev/null) || return 1
-    if [[ -n "$max_time" ]]; then
-        if ! curl -sL --connect-timeout "$connect_timeout" --max-time "$max_time" -o "$tmp_file" "$SCRIPT_RAW_URL"; then
-            rm -f "$tmp_file"
-            return 1
-        fi
-    else
-        if ! curl -sL --connect-timeout "$connect_timeout" -o "$tmp_file" "$SCRIPT_RAW_URL"; then
-            rm -f "$tmp_file"
-            return 1
-        fi
-    fi
-    echo "$tmp_file"
-}
 
 # 提取脚本版本号
-_extract_script_version() {
-    local file="$1"
-    [[ -f "$file" ]] || return 1
-    grep -m1 '^readonly VERSION=' "$file" 2>/dev/null | cut -d'"' -f2
-}
 
 # 下载脚本到指定路径
-_download_script_to() {
-    local target="$1"
-    local tmp_file
-    tmp_file=$(_fetch_script_tmp 10) || return 1
-    if mv "$tmp_file" "$target" 2>/dev/null; then
-        return 0
-    fi
-    if cp -f "$tmp_file" "$target" 2>/dev/null; then
-        rm -f "$tmp_file"
-        return 0
-    fi
-    rm -f "$tmp_file"
-    return 1
-}
 
 # 获取最新标签版本号（无缓存）
-_get_latest_tag_version() {
-    local repo="$1"
-    local result version
-    result=$(curl -sL --connect-timeout 5 --max-time 10 "https://api.github.com/repos/$repo/tags?per_page=1" 2>/dev/null)
-    [[ -z "$result" ]] && return 1
-    version=$(echo "$result" | jq -r '.[0].name // empty' 2>/dev/null | sed 's/^v//')
-    [[ -z "$version" ]] && return 1
-    echo "$version"
-}
 
 # 获取脚本最新版本号（优先 release，失败则 tag，带缓存）
-_get_latest_script_version() {
-    local use_cache="${1:-true}"
-    local force="${2:-false}"
-    local version=""
-
-    _init_version_cache
-    if [[ "$force" != "true" ]] && _is_cache_fresh "$SCRIPT_VERSION_CACHE_FILE"; then
-        cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null
-        return 0
-    fi
-
-    if [[ "$force" != "true" && "$use_cache" == "true" ]]; then
-        local cached_version
-        cached_version=$(cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null)
-        if [[ -n "$cached_version" ]]; then
-            echo "$cached_version"
-            return 0
-        fi
-    fi
-
-    version=$(_get_latest_version "$SCRIPT_REPO" "false" "true" 2>/dev/null)
-    if [[ -z "$version" ]]; then
-        version=$(_get_latest_tag_version "$SCRIPT_REPO")
-    fi
-    [[ -z "$version" ]] && return 1
-
-    echo "$version" > "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null || true
-    echo "$version"
-}
 
 # 语义化版本比较（v1 > v2 返回 0）
-_version_gt() {
-    local v1="$1" v2="$2"
-    [[ "$v1" == "$v2" ]] && return 1
-    local IFS=.
-    local i v1_arr=($v1) v2_arr=($v2)
-    for ((i=0; i<${#v1_arr[@]} || i<${#v2_arr[@]}; i++)); do
-        local n1=${v1_arr[i]:-0} n2=${v2_arr[i]:-0}
-        ((n1 > n2)) && return 0
-        ((n1 < n2)) && return 1
-    done
-    return 1
-}
 
 # 后台异步检查脚本版本（用于主菜单提示）
-_check_script_update_async() {
-    _init_version_cache
-    if _is_cache_fresh "$SCRIPT_VERSION_CACHE_FILE"; then
-        return 0
-    fi
-    (
-        _get_latest_script_version "false" "true" >/dev/null 2>&1 || exit 0
-    ) &
-}
 
-_has_script_update() {
-    [[ -f "$SCRIPT_VERSION_CACHE_FILE" ]] || return 1
-    local remote_ver
-    remote_ver=$(cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null)
-    [[ -z "$remote_ver" ]] && return 1
-    _version_gt "$remote_ver" "$VERSION"
-}
 
-_get_script_update_info() {
-    [[ -f "$SCRIPT_VERSION_CACHE_FILE" ]] || return 1
-    local remote_ver
-    remote_ver=$(cat "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null)
-    if _version_gt "$remote_ver" "$VERSION"; then
-        echo "$remote_ver"
-    fi
-}
 
 _get_snell_versions_from_kb() {
     local limit="${1:-10}"
@@ -10521,11 +10466,9 @@ create_shortcut() {
             # 从当前脚本复制（不删除原文件）
             cp -f "$real_path" "$system_script"
         else
-            # 内存运行模式，从网络下载
-            if ! _download_script_to "$system_script"; then
-                _warn "无法下载脚本到系统目录"
-                return 1
-            fi
+            # 内存运行模式：请将脚本保存到本地后运行
+            _warn "curl|bash 内存模式无法创建快捷命令，请先将脚本保存到本地"
+            return 1
         fi
     elif [[ -n "$real_path" && -f "$real_path" && "$real_path" != "$system_script" ]]; then
         # 系统目录已有脚本，用当前脚本更新（不删除原文件）
@@ -23563,6 +23506,50 @@ _set_user_quota() {
     done
 }
 
+# 配置按月流量重置
+_configure_monthly_reset() {
+    while true; do
+        _header
+        echo -e "  ${W}按月重置流量${NC}"
+        _dline
+        if monthly_reset_enabled; then
+            local day=$(monthly_reset_get_day)
+            local last=$(cat "$MONTHLY_RESET_LAST" 2>/dev/null)
+            echo -e "  当前状态: ${G}已启用${NC}  每月 ${C}${day}${NC} 日重置"
+            [[ -n "$last" ]] && echo -e "  ${D}上次重置: $last${NC}"
+        else
+            echo -e "  当前状态: ${D}未启用${NC}"
+        fi
+        echo -e "  ${D}(重置会清零所有协议所有用户的已用流量, 重置日前后的旧数据不可恢复)${NC}"
+        _line
+        _item "1" "启用/修改重置日期 (每月 1-28 日)"
+        _item "2" "停用按月重置"
+        _item "0" "返回"
+        _line
+        read -rp "  请选择: " choice
+        case $choice in
+            1)
+                read -rp "  每月几号重置 [1-28]: " day
+                if [[ "$day" =~ ^([1-9]|1[0-9]|2[0-8])$ ]]; then
+                    if ! crontab -l 2>/dev/null | grep -q "check-expire"; then
+                        ensure_expire_check_cron 2>/dev/null
+                    fi
+                    monthly_reset_set_day "$day"
+                    _ok "已启用: 每月 $day 日自动重置所有用户流量"
+                else
+                    _err "无效日期 (仅支持 1-28)"
+                fi
+                ;;
+            2)
+                monthly_reset_disable
+                _ok "已停用按月重置"
+                ;;
+            0) return ;;
+            *) _err "无效选择" ;;
+        esac
+    done
+}
+
 # 重置用户流量
 _reset_user_traffic() {
     local core="$1" proto="$2"
@@ -24521,6 +24508,7 @@ manage_users() {
         _item "3" "删除用户"
         _item "4" "设置用户配额"
         _item "5" "重置用户流量"
+        _item "m" "按月自动重置流量"
         _item "6" "启用/禁用用户"
         _item "e" "设置到期日期"
         _item "r" "修改用户路由"
@@ -24565,6 +24553,9 @@ manage_users() {
                     _reset_user_traffic "$SELECTED_CORE" "$SELECTED_PROTO"
                     _pause
                 fi
+                ;;
+            m|M)
+                _configure_monthly_reset
                 ;;
             6)
                 if _select_protocol_for_users; then
@@ -24613,83 +24604,6 @@ manage_users() {
 # 脚本更新与主入口
 #═══════════════════════════════════════════════════════════════════════════════
 
-do_update() {
-    _header
-    echo -e "  ${W}脚本更新${NC}"
-    _line
-    
-    echo -e "  当前版本: ${G}v${VERSION}${NC}"
-    _info "检查最新版本..."
-    
-    _init_version_cache
-    local tmp_file="" remote_ver=""
-    remote_ver=$(_get_latest_script_version "true" "false")
-    if [[ -z "$remote_ver" ]]; then
-        _err "无法获取远程版本信息"
-        return 1
-    fi
-    
-    echo -e "  最新版本: ${C}v${remote_ver}${NC}"
-    
-    # 比较版本 - 只有远程版本更新时才提示更新
-    if ! _version_gt "$remote_ver" "$VERSION"; then
-        _ok "已是最新版本"
-        return 0
-    fi
-    
-    _line
-    read -rp "  发现新版本，是否更新? [Y/n]: " confirm
-    if [[ "$confirm" =~ ^[nN]$ ]]; then
-        return 0
-    fi
-    
-    _info "更新中..."
-    tmp_file=$(_fetch_script_tmp 10)
-    if [[ -z "$tmp_file" || ! -f "$tmp_file" ]]; then
-        _err "下载失败，请检查网络连接"
-        return 1
-    fi
-    local downloaded_ver
-    downloaded_ver=$(_extract_script_version "$tmp_file")
-    if [[ -n "$downloaded_ver" && "$downloaded_ver" != "$remote_ver" ]]; then
-        remote_ver="$downloaded_ver"
-        echo "$remote_ver" > "$SCRIPT_VERSION_CACHE_FILE" 2>/dev/null
-    fi
-    
-    # 获取当前脚本路径
-    local script_path=$(readlink -f "$0")
-    local script_dir=$(dirname "$script_path")
-    local script_name=$(basename "$script_path")
-    
-    # 系统目录的脚本路径
-    local system_script="/usr/local/bin/vless-server.sh"
-    
-    # 备份当前脚本
-    cp "$script_path" "${script_path}.bak" 2>/dev/null
-    
-    # 替换当前运行的脚本
-    if mv "$tmp_file" "$script_path" && chmod +x "$script_path"; then
-        # 如果当前脚本不是系统目录的脚本，也更新系统目录
-        if [[ "$script_path" != "$system_script" && -f "$system_script" ]]; then
-            cp -f "$script_path" "$system_script" 2>/dev/null
-            chmod +x "$system_script" 2>/dev/null
-            _info "已同步更新系统目录脚本"
-        fi
-        
-        _ok "更新成功! v${VERSION} -> v${remote_ver}"
-        echo ""
-        echo -e "  ${C}请重新运行脚本以使用新版本${NC}"
-        echo -e "  ${D}备份文件: ${script_path}.bak${NC}"
-        _line
-        exit 0
-    else
-        # 恢复备份
-        [[ -f "${script_path}.bak" ]] && mv "${script_path}.bak" "$script_path"
-        rm -f "$tmp_file"
-        _err "更新失败"
-        return 1
-    fi
-}
 
 main_menu() {
     check_root
@@ -24707,7 +24621,6 @@ main_menu() {
     # 使用统一函数，一次请求同时获取稳定版和测试版（减少API请求次数）
     _update_all_versions_async "XTLS/Xray-core"
     _update_all_versions_async "SagerNet/sing-box"
-    _check_script_update_async
 
     # 自动同步隧道配置
     _sync_tunnel_config 2>/dev/null
@@ -24736,11 +24649,6 @@ main_menu() {
         local xray_ver_with_status singbox_ver_with_status
         xray_ver_with_status=$(_get_core_version_with_status "xray" "XTLS/Xray-core")
         singbox_ver_with_status=$(_get_core_version_with_status "sing-box" "SagerNet/sing-box")
-        local script_update_ver=""
-        if _has_script_update; then
-            script_update_ver=$(_get_script_update_info)
-        fi
-
         # 启动异步版本检查（后台，仅首次进入时触发）
         if [[ -z "$_version_check_started" ]]; then
             local xray_current singbox_current
@@ -24753,9 +24661,6 @@ main_menu() {
         # 显示版本信息（已包含状态标识）
         echo -e "  ${D}系统: ${os_version} | ${kernel_version}${NC}"
         echo -e "  ${D}核心: Xray ${xray_ver_with_status} | Sing-box ${singbox_ver_with_status}${NC}"
-        if [[ -n "$script_update_ver" ]]; then
-            echo -e "  ${Y}提示: 脚本有新版本 v${script_update_ver}，可在菜单选择「检查脚本更新」${NC}"
-        fi
         echo ""
         show_status
         echo ""
@@ -24779,16 +24684,10 @@ main_menu() {
             _item "10" "BBR 网络优化"
             _item "11" "查看运行日志"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
-            local script_update_item="检查脚本更新"
-            [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
-            _item "12" "$script_update_item"
-            _item "13" "完全卸载"
+            _item "12" "完全卸载"
         else
             _item "1" "安装协议"
             echo -e "  ${D}───────────────────────────────────────────${NC}"
-            local script_update_item="检查脚本更新"
-            [[ -n "$script_update_ver" ]] && script_update_item="检查脚本更新 ${Y}[有更新 v${script_update_ver}]${NC}"
-            _item "12" "$script_update_item"
         fi
         _item "0" "退出"
         _line
@@ -24809,15 +24708,13 @@ main_menu() {
                 9) manage_cloudflare_tunnel; skip_pause=true ;;
                 10) enable_bbr; skip_pause=true ;;
                 11) show_logs; skip_pause=true ;;
-                12) do_update ;;
-                13) do_uninstall ;;
+                12) do_uninstall ;;
                 0) exit 0 ;;
                 *) _err "无效选择"; skip_pause=true ;;
             esac
         else
             case $choice in
                 1) do_install_server; skip_pause=true ;;
-                12) do_update ;;
                 0) exit 0 ;;
                 *) _err "无效选择"; skip_pause=true ;;
             esac
@@ -24841,10 +24738,13 @@ case "${1:-}" in
         exit 0
         ;;
     --check-expire)
-        # 检查并禁用过期用户，发送提醒
+        # 检查并禁用过期用户，发送提醒; 顺带执行按月流量重置检查
         init_db
         echo "检查用户到期状态..."
         echo "[$(date '+%Y-%m-%d %H:%M:%S')] 开始过期检查..." >> "$CFG/expire.log"
+        # 按月流量重置检查
+        monthly_reset_count=$(monthly_traffic_reset)
+        echo "  按月重置用户数: $monthly_reset_count" >> "$CFG/expire.log"
         # 发送即将过期提醒 (3天内)
         warnings=$(send_expire_warnings 3)
         echo "  发送 $warnings 条过期提醒" >> "$CFG/expire.log"
